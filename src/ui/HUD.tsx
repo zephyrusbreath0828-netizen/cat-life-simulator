@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react'
 import { t } from '../i18n'
 import { useCatStore, driveLevel, NEED_KEYS, type NeedKey } from '../sim/catStore'
-import { APP_VERSION, VERSION_LABEL } from '../version'
+import { PERSONALITY_IDS, type PersonalityId } from '../sim/personality'
+import { VERSION_LABEL } from '../version'
 
 /**
- * HUD（画面 UI）v1.1.0。
+ * HUD（画面 UI）v1.2.0。
  * 表示される文字列はすべて i18n リソース（src/i18n/ja.ts）から供給する。
- * - 右上: 情報パネル（名前・状態・経過時間・現在時刻・欲求 5 種）
+ * - 起動時: 猫作成カード（名前入力 + 性格選択）
+ * - 右上: 情報パネル（名前・性格・状態・経過時間・現在時刻・欲求 5 種）
  * - 下中央: 自由視点 / 猫を追跡 / 一時停止 / 設定
- * - 設定画面: カメラ設定・開発用デバッグ（欲求の即時変更）・バージョン表示
- * - 右下: Version v1.1.0
+ * - 設定画面: カメラ・性格変更・開発用デバッグ・バージョン表示
+ * - 右下: Version v1.2.0
  */
 
 /** 現在時刻（1 秒ごとに更新） */
@@ -38,7 +40,31 @@ function NeedRow({ label, value }: { label: string; value: number }) {
   )
 }
 
-/** 設定画面（カメラ・開発用デバッグ・バージョン） */
+/** 性格選択グリッド（作成カードと設定画面で共用） */
+function PersonalityGrid() {
+  const dict = t()
+  const personality = useCatStore((s) => s.personality)
+  const setPersonality = useCatStore((s) => s.setPersonality)
+  const selected = dict.personalities[personality]
+  return (
+    <>
+      <div className="personality-grid">
+        {PERSONALITY_IDS.map((id) => (
+          <button
+            key={id}
+            className={`btn personality${personality === id ? ' active' : ''}`}
+            onClick={() => setPersonality(id as PersonalityId)}
+          >
+            {dict.personalities[id].name}
+          </button>
+        ))}
+      </div>
+      {selected && <div className="personality-desc">{selected.desc}</div>}
+    </>
+  )
+}
+
+/** 設定画面（カメラ・性格・開発用デバッグ・バージョン） */
 function SettingsScreen({ onClose }: { onClose: () => void }) {
   const dict = t()
   const cameraMode = useCatStore((s) => s.cameraMode)
@@ -68,6 +94,9 @@ function SettingsScreen({ onClose }: { onClose: () => void }) {
             {dict.buttons.follow}
           </button>
         </div>
+
+        <div className="settings-section">{dict.settings.personality}</div>
+        <PersonalityGrid />
 
         <div className="settings-section">{dict.settings.debug}</div>
         <div className="settings-note">{dict.settings.debugNote}</div>
@@ -99,6 +128,7 @@ function SettingsScreen({ onClose }: { onClose: () => void }) {
 export function HUD({ entered, onEnter }: { entered: boolean; onEnter: () => void }) {
   // Zustand のセレクタで必要な値だけ購読する
   const name = useCatStore((s) => s.name)
+  const personality = useCatStore((s) => s.personality)
   const phase = useCatStore((s) => s.phase)
   const elapsed = useCatStore((s) => s.elapsedSeconds)
   const needs = useCatStore((s) => s.needs)
@@ -106,10 +136,13 @@ export function HUD({ entered, onEnter }: { entered: boolean; onEnter: () => voi
   const cameraMode = useCatStore((s) => s.cameraMode)
   const setCameraMode = useCatStore((s) => s.setCameraMode)
   const togglePause = useCatStore((s) => s.togglePause)
+  const setName = useCatStore((s) => s.setName)
 
   const dict = t()
   const now = useClock()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 猫作成カードの名前入力（確定は「部屋に入る」を押したとき）
+  const [draftName, setDraftName] = useState(name)
 
   // 最も高い欲求に応じた状態コメント
   const strongest = NEED_KEYS.reduce((a, b) => (needs[b] > needs[a] ? b : a), NEED_KEYS[0] as NeedKey)
@@ -117,13 +150,32 @@ export function HUD({ entered, onEnter }: { entered: boolean; onEnter: () => voi
 
   return (
     <div className="hud">
-      {/* 導入カード */}
+      {/* 猫作成カード（起動時） */}
       {!entered && (
-        <div className="overlay" onClick={onEnter}>
+        <div className="overlay">
           <div className="card">
             <div className="kicker">{dict.intro.kicker}</div>
             <h1>{dict.intro.title}</h1>
             <p className="sub">{dict.intro.sub}</p>
+
+            <div className="create-section">{dict.create.title}</div>
+            <div className="name-row">
+              <span className="k">{dict.create.nameLabel}</span>
+              <input
+                className="name-input"
+                value={draftName}
+                maxLength={12}
+                placeholder={dict.create.namePlaceholder}
+                onChange={(e) => setDraftName(e.target.value)}
+              />
+            </div>
+            <div className="create-section">{dict.create.personalityLabel}</div>
+            <PersonalityGrid />
+            <div className="settings-note">{dict.create.personalityNote}</div>
+
+            <button className="cta" onClick={() => { setName(draftName); onEnter() }}>
+              {dict.intro.enter}
+            </button>
             <ul className="controls">
               <li>
                 <span className="keys">
@@ -147,7 +199,6 @@ export function HUD({ entered, onEnter }: { entered: boolean; onEnter: () => voi
                 <span className="label">{dict.intro.controls.pan}</span>
               </li>
             </ul>
-            <div className="cta">{dict.intro.enter}</div>
             <div className="note">{dict.intro.note}</div>
           </div>
         </div>
@@ -159,6 +210,10 @@ export function HUD({ entered, onEnter }: { entered: boolean; onEnter: () => voi
           <div className="info-row">
             <span className="k">{dict.panel.nameLabel}</span>
             <span className="v">{name}</span>
+          </div>
+          <div className="info-row">
+            <span className="k">{dict.panel.personalityLabel}</span>
+            <span className="v">{dict.personalities[personality]?.name ?? personality}</span>
           </div>
           <div className="info-row">
             <span className="k">{dict.panel.stateLabel}</span>
@@ -228,6 +283,3 @@ export function HUD({ entered, onEnter }: { entered: boolean; onEnter: () => voi
     </div>
   )
 }
-
-// 未使用インポートの整理用（APP_VERSION は version.ts で VERSION_LABEL 経由で利用）
-void APP_VERSION

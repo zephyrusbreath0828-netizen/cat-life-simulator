@@ -2,26 +2,30 @@ import { useRef } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { CatModel } from '../model'
-import { chooseNextAction, randomFloorPoint, isSpotAction, type CatAction } from './scheduler'
+import { chooseNextAction, randomFloorPoint, isSpotAction, respondToStimulus, type CatAction } from './scheduler'
 import { useCatStore, type CatPhase } from '../../sim/catStore'
+import { getPersonality } from '../../sim/personality'
+import { drainStimuli } from '../../sim/stimulusQueue'
 import { resolveCircle } from '../../systems/collision'
 import { CAT_START, CAT_RADIUS } from '../../layout'
 import { catRuntime } from '../runtime'
 
 /**
- * 猫の行動コントローラ (v1.1.0)。
+ * 猫の行動コントローラ (v1.2.0)。
  *
  * 役割分担:
  * - scheduler.chooseNextAction() が出した「1 行動」を実行する
  *   （移動の積分・旋回・衝突解決・施設の使用・完了判定）
  * - 意思決定そのものは scheduler 側にあり、ここにはない
- * - 施設アクション（食事など）は「移動フェーズ → 実行フェーズ」に
- *   自動で分解される。実行中は欲求が継続的に回復する
+ * - v1.2.0: 性格（PersonalityProfile）が移動速度・ランダム地点の
+ *   選好・行動の切替やすさに効く。性格変更は実行中でも即座に反映
+ * - 外部刺激（来客イベント等）は刺激キュー経由で受け付け、
+ *   性格に応じた反応行動へ差し替える
  * - 高頻度の値は Ref / シングルトン経由で渡し、React の再描画は
  *   「フェーズが変わった瞬間の 1 回」だけ発生させる
  */
 
-const WALK_SPEED = 0.55 // 歩行速度 (m/s)
+const BASE_WALK_SPEED = 0.55 // 基礎歩行速度 (m/s)（性格の倍率が掛かる）
 const TURN_RATE = 3.0 // 旋回速度 (rad/s)
 const ARRIVE_DIST = 0.09 // 到達判定の距離
 const TICK_INTERVAL = 0.25 // ストア更新（UI 更新）の間隔
@@ -42,6 +46,7 @@ export function CatController() {
       phase: 'idle',
       pos: { x: CAT_START.x, z: CAT_START.z },
       needs: useCatStore.getState().needs,
+      personality: getPersonality(useCatStore.getState().personality),
     }),
     phaseStart: 0, // 現在の行動を開始した時刻
     performStart: 0, // 施設の「実行フェーズ」に入った時刻
@@ -51,6 +56,7 @@ export function CatController() {
     lastX: CAT_START.x,
     lastZ: CAT_START.z,
     lastPhase: 'idle' as CatPhase,
+    lastPid: useCatStore.getState().personality,
   })
 
   /** 目標角度へ最短経路で旋回する */
@@ -74,9 +80,34 @@ export function CatController() {
       acc.current = 0
     }
 
+    // 性格（現在のプロファイル）。実行中でも変更が即座に反映される
+    const p = getPersonality(store.personality)
     const r = rt.current
-    const a = r.action
     const pos = root.current.position
+
+    // ---- 性格が変更された → 自由行動の最中なら新しい傾向で再決定する ----
+    if (r.lastPid !== store.personality) {
+      r.lastPid = store.personality
+      if (!isSpotAction(r.action)) {
+        r.action = chooseNextAction({ phase: phaseRef.current, pos: { x: pos.x, z: pos.z }, needs: store.needs, personality: p })
+        r.phaseStart = simTimeRef.current
+        r.inPerform = false
+        r.stuck = 0
+      }
+    }
+
+    // ---- 外部刺激（来客イベント等）の処理 ----
+    const stim = drainStimuli()
+    if (stim.length > 0) {
+      r.action = respondToStimulus(p, stim[0].at)
+      r.phaseStart = simTimeRef.current
+      r.inPerform = false
+      r.stuck = 0
+      r.lastX = pos.x
+      r.lastZ = pos.z
+    }
+
+    const a = r.action
     let done = false
 
     if (isSpotAction(a)) {
@@ -86,11 +117,11 @@ export function CatController() {
       const dist = Math.hypot(dxs, dzs)
 
       if (!r.inPerform && dist > ARRIVE_DIST) {
-        // 移動フェーズ: 目標点へ向かう
+        // 移動フェーズ: 目標点へ向かう（性格で速度が変わる）
         phaseRef.current = 'walk'
         steer(r, Math.atan2(dxs, dzs), dt)
         const align = Math.max(0, Math.cos(Math.atan2(dxs, dzs) - r.yaw))
-        const speed = WALK_SPEED * align
+        const speed = BASE_WALK_SPEED * p.walkSpeedMul * align
         if (dist > ARRIVE_DIST) {
           pos.x += Math.sin(r.yaw) * speed * dt
           pos.z += Math.cos(r.yaw) * speed * dt
@@ -124,14 +155,14 @@ export function CatController() {
         }
       }
     } else if (a.kind === 'walk') {
-      // ---- ランダム移動 ----
+      // ---- ランダム移動（性格で速度と選好が変わる） ----
       phaseRef.current = 'walk'
       const dx = a.target.x - pos.x
       const dz = a.target.z - pos.z
       const dist = Math.hypot(dx, dz)
       steer(r, Math.atan2(dx, dz), dt)
       const align = Math.max(0, Math.cos(Math.atan2(dx, dz) - r.yaw))
-      const speed = WALK_SPEED * align
+      const speed = BASE_WALK_SPEED * p.walkSpeedMul * align
       if (dist > ARRIVE_DIST) {
         pos.x += Math.sin(r.yaw) * speed * dt
         pos.z += Math.cos(r.yaw) * speed * dt
@@ -159,16 +190,17 @@ export function CatController() {
       r.stuck = 0
       r.phaseStart = simTimeRef.current
       if (a.kind === 'window') {
-        // 窓を見た後は部屋を探索する（要件: 窓を見る → 部屋を探索）
-        r.action = { kind: 'walk', target: randomFloorPoint(), timeout: 12 }
+        // 窓を見た後は部屋を探索する
+        r.action = { kind: 'walk', target: randomFloorPoint(p), timeout: 12 }
       } else {
         r.action = chooseNextAction({
           phase: phaseRef.current,
           pos: { x: pos.x, z: pos.z },
           needs: useCatStore.getState().needs,
+          personality: p,
         })
       }
-      // その場で眠る自由行動は、開始時の現在地をspotに固定する
+      // その場で眠る自由行動は、開始時の現在地を spot に固定する
       if (r.action.kind === 'sleepSpot') {
         const here = { x: pos.x, z: pos.z }
         r.action.spot = here

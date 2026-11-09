@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { launchParams } from './launchParams'
+import { getPersonality } from './personality'
 
 /**
  * 猫とシミュレーションの状態を一元管理する Zustand ストア。
@@ -9,10 +10,9 @@ import { launchParams } from './launchParams'
  *   `cat/runtime.ts` のシングルトンで扱う（再描画コストの分離）。
  * - 欲求は「駆動力モデル」: 数値が高いほど切実（0〜100）。
  *   時間経過で増え、対応する行動（食事・睡眠など）で減る。
- * - 新しい欲求を追加する場合は NEED_KEYS / GROWTH_PER_SECOND /
- *   scheduler の DRIVES に項目を足すだけで UI・AI が追従する
- *   （複数猫・性格などの拡張も、このストアを猫インスタンス毎に
- *     持つ形へ発展させられる）。
+ *   増加率には性格（personality）の倍率が掛かる。
+ * - 複数猫・年齢・体重・飼い主などの拡張は、このストアを
+ *   「猫プロファイル 1 つ + ランタイム 1 つ」の単位に発展させる。
  */
 
 /** 猫の行動フェーズ（状態システム） */
@@ -36,7 +36,7 @@ export type Needs = Record<NeedKey, number>
 /** 欲求キーの固定順（UI 表示・走査に使用） */
 export const NEED_KEYS: NeedKey[] = ['hunger', 'thirst', 'sleepy', 'play', 'curiosity']
 
-/** 欲求の増加率（毎秒・デモ速度。行動AIのチューニング後に調整する） */
+/** 欲求の基礎増加率（毎秒・デモ速度。性格の倍率がこれに掛かる） */
 const GROWTH_PER_SECOND: Needs = {
   hunger: 0.28, // 空腹度
   thirst: 0.33, // 喉の渇き
@@ -45,12 +45,14 @@ const GROWTH_PER_SECOND: Needs = {
   curiosity: 0.35, // 好奇心
 }
 
-/** 欲求の既定値（起動直後） */
+/** 欲求の既定値（猫作成直後） */
 const DEFAULT_NEEDS: Needs = { hunger: 45, thirst: 40, sleepy: 25, play: 55, curiosity: 50 }
 
 interface CatStore {
-  /** 猫の名前（UI 表示用） */
+  /** 猫の名前（猫作成画面で入力できる） */
   name: string
+  /** 性格 ID（行動傾向を決める。設定画面でいつでも変更できる） */
+  personality: string
   /** 現在の行動フェーズ */
   phase: CatPhase
   /** 一時停止中か */
@@ -62,6 +64,8 @@ interface CatStore {
   /** 欲求（0〜100、高いほど切実） */
   needs: Needs
 
+  setName: (name: string) => void
+  setPersonality: (id: string) => void
   setPhase: (phase: CatPhase) => void
   togglePause: () => void
   setCameraMode: (mode: CameraMode) => void
@@ -82,12 +86,15 @@ for (const key of NEED_KEYS) {
 
 export const useCatStore = create<CatStore>()((set) => ({
   name: 'ミケ',
+  personality: launchParams.personality,
   phase: 'idle',
   paused: launchParams.pause,
   cameraMode: launchParams.follow ? 'follow' : 'free',
   elapsedSeconds: 0,
   needs: initialNeeds,
 
+  setName: (name) => set({ name: name.trim() || 'ミケ' }),
+  setPersonality: (personality) => set({ personality }),
   setPhase: (phase) => set({ phase }),
   togglePause: () => set((s) => ({ paused: !s.paused })),
   setCameraMode: (cameraMode) => set({ cameraMode }),
@@ -95,9 +102,12 @@ export const useCatStore = create<CatStore>()((set) => ({
   tick: (dt) =>
     set((s) => {
       if (s.paused) return s
+      // 性格の倍率を掛けて欲求を成長させる
+      const p = getPersonality(s.personality)
       const needs = { ...s.needs }
       for (const key of NEED_KEYS) {
-        needs[key] = Math.min(100, needs[key] + GROWTH_PER_SECOND[key] * dt)
+        const mul = p.growthAll * (p.growth[key] ?? 1)
+        needs[key] = Math.min(100, needs[key] + GROWTH_PER_SECOND[key] * mul * dt)
       }
       return { elapsedSeconds: s.elapsedSeconds + dt, needs }
     }),

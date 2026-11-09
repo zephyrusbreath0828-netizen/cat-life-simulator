@@ -438,3 +438,86 @@ kbd {
   padding: 11px;
   font-size: 14px;
 }
+
+/* ---------- v1.2.0 追加: 猫作成カード・性格選択 ---------- */
+
+.create-section {
+  text-align: left;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  color: rgba(243, 234, 217, 0.55);
+  border-bottom: 1px solid rgba(255, 240, 220, 0.12);
+  padding-bottom: 5px;
+  margin: 14px 0 10px;
+}
+
+.name-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.name-row .k {
+  font-size: 13px;
+  color: rgba(243, 234, 217, 0.72);
+}
+
+.name-input {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 240, 220, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f3ead9;
+  font-family: inherit;
+  font-size: 15px;
+}
+
+.name-input:focus {
+  outline: 2px solid #e8a13c;
+  outline-offset: 1px;
+}
+
+.personality-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.btn.personality {
+  padding: 10px 8px;
+  font-size: 13.5px;
+}
+
+.personality-desc {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(243, 234, 217, 0.72);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 8px 10px;
+  min-height: 40px;
+  text-align: left;
+}
+
+.cta {
+  display: inline-block;
+  margin-top: 16px;
+  width: 100%;
+  padding: 13px 16px;
+  border: none;
+  border-radius: 12px;
+  background: #e8a13c;
+  color: #241708;
+  font-weight: 650;
+  font-size: 15px;
+  font-family: inherit;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.cta:hover {
+  filter: brightness(1.06);
+}

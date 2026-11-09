@@ -1,16 +1,21 @@
 import { ROOM, POI, CAT_COLLIDERS } from '../../layout'
 import type { CatPhase, NeedKey, Needs } from '../../sim/catStore'
+import type { PersonalityProfile, FreeActionKind } from '../../sim/personality'
 
 /**
- * 行動の「意思決定レイヤー」(v1.1.0)。
+ * 行動の「意思決定レイヤー」(v1.2.0)。
  *
  * 方針: 一定時間ごとに呼ばれ、最も切実な欲求（閾値 80 以上）を優先し、
  * 該当する施設（餌皿・給水器・猫ベッド・ボール・窓辺）へ向かう行動を返す。
- * どの欲求も閾値に達していなければ、重み付きランダムで自由行動を選ぶ。
+ * どの欲求も閾値に達していなければ、性格の重み倍率を掛けた
+ * 重み付きランダムで自由行動を選ぶ。
  *
- * 意思決定はこの関数 1 本に集約されているため、今後の拡張
- * （性格による重み補正、学習機能、複数猫）はこのファイルの
- * 差し替えで完結する。実行側（CatController）は戻り値を実行するだけ。
+ * v1.2.0 で性格（PersonalityProfile）を導入:
+ * - 自由行動の重み・継続時間・移動先の選好が性格で変化する
+ * - respondToStimulus() で外部刺激（来客イベント等）への反応も定義
+ *
+ * 意思決定はこの関数群 1 か所に集約されているため、将来の拡張
+ * （学習機能、複数猫、来客イベント実装）はこのファイルの差し替えで完結する。
  */
 
 /** 猫が実行すべき 1 回分の行動 */
@@ -44,6 +49,8 @@ export interface DecisionContext {
   pos: { x: number; z: number }
   /** 現在の欲求（駆動力: 高いほど切実） */
   needs: Needs
+  /** 猫の性格プロファイル */
+  personality: PersonalityProfile
 }
 
 /** 行動の継続時間（秒）のランダム範囲 */
@@ -131,33 +138,18 @@ const DRIVE_ACTIONS: {
   },
 ]
 
-/** 自由行動の重みテーブル（欲求が閾値未達のときの過ごし方） */
-const NEXT_WEIGHTS: { kind: 'idle' | 'walk' | 'sit' | 'sleep' | 'play' | 'window'; weight: number }[] = [
-  { kind: 'walk', weight: 38 },
-  { kind: 'idle', weight: 28 },
-  { kind: 'sit', weight: 15 },
-  { kind: 'sleep', weight: 10 },
-  { kind: 'play', weight: 5 },
-  { kind: 'window', weight: 4 },
-]
+/** 自由行動の基礎重み（性格の倍率がこれに掛かる） */
+const BASE_WEIGHTS: Record<FreeActionKind, number> = {
+  idle: 28,
+  walk: 38,
+  sit: 15,
+  sleep: 10,
+  play: 5,
+  window: 4,
+}
 
-/** 部屋の中から家具の上にならない床の一点をランダムに選ぶ（リジェクトサンプリング） */
-export function randomFloorPoint(): { x: number; z: number } {
-  const margin = CAT_CLEARANCE
-  for (let i = 0; i < 40; i++) {
-    const x = -ROOM.W / 2 + margin + Math.random() * (ROOM.W - margin * 2)
-    const z = -ROOM.D / 2 + margin + Math.random() * (ROOM.D - margin * 2)
-    const blocked = CAT_COLLIDERS.some(
-      (c) =>
-        x > c.minX - CAT_CLEARANCE &&
-        x < c.maxX + CAT_CLEARANCE &&
-        z > c.minZ - CAT_CLEARANCE &&
-        z < c.maxZ + CAT_CLEARANCE,
-    )
-    if (!blocked) return { x, z }
-  }
-  // 40 回試しても空きが見つからない場合は部屋の中央付近を返す
-  return { x: 0, z: -0.5 }
+function clamp(v: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, v))
 }
 
 function pickWeighted<T extends { weight: number }>(items: T[]): T {
@@ -174,26 +166,70 @@ function randomBetween([min, max]: [number, number]) {
   return min + Math.random() * (max - min)
 }
 
-/** 自由行動を組み立てる */
-function buildFreeAction(kind: 'idle' | 'walk' | 'sit' | 'sleep' | 'play' | 'window'): CatAction {
+/**
+ * ランダムな床の一点を選ぶ。性格の targetBias に応じて選好が変わる:
+ * - anywhere: 部屋全体から一様ランダム
+ * - corners: いずれかの隅の周辺を好む（臆病）
+ * - center: 中央付近に集まりやすい（甘えん坊・飼い主未実装の仮行動）
+ * 家具の上にならないようリジェクトサンプリングする。
+ */
+export function randomFloorPoint(profile?: PersonalityProfile): { x: number; z: number } {
+  const margin = CAT_CLEARANCE
+  const bias = profile?.targetBias ?? 'anywhere'
+  for (let i = 0; i < 40; i++) {
+    let x: number
+    let z: number
+    if (bias === 'corners') {
+      // 4 隅のどれかの周辺をサンプルする
+      const sx = Math.random() < 0.5 ? -1 : 1
+      const sz = Math.random() < 0.5 ? -1 : 1
+      x = sx * (ROOM.W / 2 - 0.8) + (Math.random() - 0.5) * 1.6
+      z = sz * (ROOM.D / 2 - 0.8) + (Math.random() - 0.5) * 1.6
+    } else if (bias === 'center') {
+      // 中央付近（ローテーブルの周り）に集まる
+      x = 0.2 + (Math.random() - 0.5) * 2.4
+      z = 0.5 + (Math.random() - 0.5) * 2.0
+    } else {
+      x = -ROOM.W / 2 + margin + Math.random() * (ROOM.W - margin * 2)
+      z = -ROOM.D / 2 + margin + Math.random() * (ROOM.D - margin * 2)
+    }
+    x = clamp(x, -ROOM.W / 2 + margin, ROOM.W / 2 - margin)
+    z = clamp(z, -ROOM.D / 2 + margin, ROOM.D / 2 - margin)
+    const blocked = CAT_COLLIDERS.some(
+      (c) =>
+        x > c.minX - CAT_CLEARANCE &&
+        x < c.maxX + CAT_CLEARANCE &&
+        z > c.minZ - CAT_CLEARANCE &&
+        z < c.maxZ + CAT_CLEARANCE,
+    )
+    if (!blocked) return { x, z }
+  }
+  // 40 回試しても空きが見つからない場合は部屋の中央付近を返す
+  return { x: 0, z: -0.5 }
+}
+
+/** 自由行動を組み立てる（性格の dwellMul で継続時間が伸びる） */
+function buildFreeAction(kind: FreeActionKind, p: PersonalityProfile): CatAction {
   switch (kind) {
     case 'walk':
-      return { kind: 'walk', target: randomFloorPoint(), timeout: randomBetween(WALK_TIMEOUT) }
-    case 'sit':
-      return { kind: 'sit', duration: randomBetween(DURATIONS.sit) }
-    case 'sleep':
-      // ランダムのお昼寝: その場で丸くなり、眠気を少し回復する
-      {
-        const here = { x: 0, z: 0 } // spot は実行開始時の現在地へ置き換えられる（Controller側）
-        return {
-          kind: 'sleepSpot',
-          spot: here,
-          look: here,
-          timeout: randomBetween(DURATIONS.sleep),
-          minPerform: randomBetween(DURATIONS.sleep),
-          drain: { key: 'sleepy', rate: 3, floor: 20 },
-        }
+      return {
+        kind: 'walk',
+        target: randomFloorPoint(p),
+        timeout: randomBetween(WALK_TIMEOUT) * Math.max(1, p.dwellMul),
       }
+    case 'sit':
+      return { kind: 'sit', duration: randomBetween(DURATIONS.sit) * p.dwellMul }
+    case 'sleep': {
+      // ランダムのお昼寝: その場で丸くなり、眠気を少し回復する
+      return {
+        kind: 'sleepSpot',
+        spot: { x: 0, z: 0 }, // 実行開始時の現在地へ置き換えられる（Controller側）
+        look: { x: 0, z: 0 },
+        timeout: randomBetween(DURATIONS.sleep) * p.dwellMul,
+        minPerform: randomBetween(DURATIONS.sleep) * p.dwellMul,
+        drain: { key: 'sleepy', rate: 3, floor: 20 },
+      }
+    }
     case 'play':
       return {
         kind: 'play',
@@ -213,23 +249,60 @@ function buildFreeAction(kind: 'idle' | 'walk' | 'sit' | 'sleep' | 'play' | 'win
         drain: { key: 'curiosity', rate: 9, floor: 15 },
       }
     default:
-      return { kind: 'idle', duration: randomBetween(DURATIONS.idle) }
+      return { kind: 'idle', duration: randomBetween(DURATIONS.idle) * p.dwellMul }
   }
 }
 
 /**
  * 次の 1 行動を決定する。
  * 1) 閾値 (80) を超えた欲求のうち最も高いもの → 対応施設への行動
- * 2) なければ重み付きランダムの自由行動（眠気 60 以上なら時々お昼寝）
+ * 2) なければ性格の重み倍率を掛けた重み付きランダムの自由行動
  */
 export function chooseNextAction(ctx: DecisionContext): CatAction {
+  const p = ctx.personality
+
   // 閾値以上の欲求を高い順に並べ、最も切実なものから優先する
   const urgent = DRIVE_ACTIONS.filter((d) => ctx.needs[d.key] >= d.threshold).sort(
     (a, b) => ctx.needs[b.key] - ctx.needs[a.key],
   )
   if (urgent.length > 0) return urgent[0].build()
 
-  if (ctx.needs.sleepy >= 60 && Math.random() < 0.4) return buildFreeAction('sleep')
+  // 眠気だけは閾値手前（60 以上）でもベッドに行きたがることがある
+  if (ctx.needs.sleepy >= 60 && Math.random() < 0.4 / p.calmness) return buildFreeAction('sleep', p)
 
-  return buildFreeAction(pickWeighted(NEXT_WEIGHTS).kind)
+  const items = (Object.keys(BASE_WEIGHTS) as FreeActionKind[]).map((kind) => ({
+    kind,
+    weight: BASE_WEIGHTS[kind] * (p.weights[kind] ?? 1),
+  }))
+  return buildFreeAction(pickWeighted(items).kind, p)
+}
+
+/**
+ * 外部刺激（来客・物音など）への反応。
+ * 将来の来客イベントは sim/stimulusQueue.ts の pushStimulus() から呼ばれる。
+ * - 臆病: 刺激から最も遠い隅へ避難する
+ * - 甘えん坊: 刺激の近くへ寄っていく（人懐っこい）
+ * - その他: 少し身構えて（待機）から様子を見る
+ */
+export function respondToStimulus(p: PersonalityProfile, at?: { x: number; z: number }): CatAction {
+  const sx = at?.x ?? 3 // 省略時は玄関（東）方向を刺激源とみなす
+  const sz = at?.z ?? 0
+  if (p.targetBias === 'corners') {
+    // 刺激から最も遠い隅を探して避難する
+    const corners = [
+      { x: -ROOM.W / 2 + 0.8, z: -ROOM.D / 2 + 0.8 },
+      { x: ROOM.W / 2 - 0.8, z: -ROOM.D / 2 + 0.8 },
+      { x: -ROOM.W / 2 + 0.8, z: ROOM.D / 2 - 0.8 },
+      { x: ROOM.W / 2 - 0.8, z: ROOM.D / 2 - 0.8 },
+    ]
+    const far = corners.reduce((a, b) =>
+      Math.hypot(b.x - sx, b.z - sz) > Math.hypot(a.x - sx, a.z - sz) ? b : a,
+    )
+    return { kind: 'walk', target: far, timeout: 12 * p.calmness }
+  }
+  if (p.targetBias === 'center') {
+    // 人懐っこい: 刺激の近くへ寄っていく
+    return { kind: 'walk', target: { x: sx * 0.5, z: sz * 0.5 }, timeout: 10 }
+  }
+  return { kind: 'idle', duration: 2.5 * p.calmness }
 }
