@@ -6,6 +6,8 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 // so the built simulator is one self-contained file that runs offline.
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
+  // .glb をアセットとして扱い、data URI にインライン化する（単一 HTML 用）
+  assetsInclude: ['**/*.glb'],
   build: {
     target: 'esnext',
     cssCodeSplit: false,
